@@ -5,6 +5,7 @@
 #include <errno.h>
 
 #include "myprotocol.h"
+#include "process.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -17,6 +18,138 @@
 /* Tamanho do buffer */
 #define BUFFER_LENGTH 4096
 
+/*
+ * Função reponsavel em comunicar com o cliente e executar as instruções
+ */
+void* functionClient(void* arg){
+    Thread* self = (Thread*)arg;
+    int* clientfd = (int*) self->input; /*Descritores de arquivo do cliente*/
+
+    MyProtocol* protocol; // Meu protocolo de aplicação simples 
+    char path[100] = {0}; // Memória do diretorio RAIZ
+    char buffer[BUFFER_LENGTH] = {0};
+    FILE* fp; // PIPE dos processos internos (mv,rename,rm,cd,ls,mkdir)
+    
+    
+    if (getcwd(path, sizeof(path)) == NULL){
+        printf("Error getcwd");
+        exit(1);
+    }
+
+    
+
+    strcpy(buffer, "Hello, client!\n\0");
+
+
+    /* Envia a primeira mensagem ao cilente */
+    if (send(*clientfd, buffer, strlen(buffer), 0)) {
+        fprintf(stdout, "Client connected.\nWaiting for client message ...\n");
+
+        /* limpa o buffer */
+        memset(buffer, 0x0, BUFFER_LENGTH);
+
+        /* Comunica-se com o cliente */
+        int message_len;
+        while((message_len = recv(*clientfd, buffer, BUFFER_LENGTH, 0)) > 0){
+
+            printf("Client sent: %s\n", buffer);
+
+            protocol = NULL;
+            
+            protocol = parseProtocol(buffer);
+            printProtocol(protocol);
+            
+            if (!validProtocol(protocol)){
+                send(*clientfd, "Invalid\n", 9, 0);
+                continue;
+            }
+
+            if (strcmp(protocol->command, "pwd") == 0){
+                send(*clientfd, path, strlen(path), 0);
+                send(*clientfd, "\n", 1, 0);
+                continue;
+            }
+            
+
+            char command[1000] = {0};
+            char responseCommand[4096];
+            
+            strcpy(command, "cd ");
+            strcat(command, path);
+            strcat(command, " && ");
+
+            strcat(command, protocol->command);
+
+            if (strcmp(protocol->command, "ls") == 0){
+                strcat(command, " -1");
+            }if (
+                strcmp(protocol->command, "mkdir") == 0 || 
+                strcmp(protocol->command, "rm") == 0 ||
+                strcmp(protocol->command, "rmdir") == 0 ||
+                strcmp(protocol->command, "mv") == 0 ||
+                strcmp(protocol->command, "rename") == 0   ){
+            
+                strcat(command, " -v");
+
+                if (strcmp(protocol->command, "mkdir") == 0){
+                    strcat(command, " -p");
+                }
+                
+            
+            }
+
+
+            for (int i = 0; i < protocol->argc; i++){
+                strcat(command, " "); 
+                strcat(command, protocol->argv[i]);
+            }
+
+            strcat(command, " 2>&1");
+
+            if (strcmp(protocol->command, "cd") == 0){
+                strcat(command, " && pwd");
+            }
+            
+            
+            printf("COMMAND: %s\n", command);
+            fp = popen(command, "r");
+
+            if (fp == NULL) {
+                printf("Failed to run command\n" );
+                exit(1);
+            }
+
+            while (fgets(responseCommand, sizeof(responseCommand), fp) != NULL) {
+                send(*clientfd, responseCommand, strlen(responseCommand), 0);
+                
+                if (strlen(responseCommand) > 2 && strcmp(protocol->command, "cd") == 0 && responseCommand[0] == '/'){
+                    if (responseCommand[strlen(responseCommand) - 1] == '\n'){
+                        responseCommand[strlen(responseCommand) - 1] = '\0';
+                    }
+                    strcpy(path, responseCommand);
+                }
+                
+            }
+
+            pclose(fp);
+            printf("PATH_MEMORY: %s\n", path);
+
+
+        }
+
+        if (message_len == -1){ /* Conexão do cliente ERROR */
+            printf("Error recv in client\n");
+        } else if (message_len == 0){ /* Conexão do cliente Close */
+            printf("Client disconnected\n");
+            close(*clientfd);
+        }
+        
+    }
+
+    return NULL;
+
+} 
+
 
 /*
  * Função main do servidor
@@ -25,19 +158,8 @@
 int main(int argc, char const *argv[]) {
 
     struct sockaddr_in client, server; /* sockets struct do cliente e servidor */
-    MyProtocol* protocol; // Meu protocol de aplicação simples 
-    
-    char path[100] = {0}; // Memória do diretorio RAIZ
-    FILE* fp; // PIPE dos processos internos (mv,rename,rm,cd,ls,mkdir)
+    int serverfd; /* Descritores de arquivo do servidor */
 
-    int serverfd, clientfd; /* Descritores de arquivo do cliente e servidor */
-
-    char buffer[BUFFER_LENGTH];
-
-    if (getcwd(path, sizeof(path)) == NULL){
-        printf("Error getcwd");
-        exit(1);
-    }
     
     fprintf(stdout, "Starting server\n");
 
@@ -82,122 +204,17 @@ int main(int argc, char const *argv[]) {
 
     while (1){
         socklen_t client_len = sizeof(client);
-        if ((clientfd=accept(serverfd,
-            (struct sockaddr *) &client, &client_len )) == -1) {
+        int* clientfd = calloc(1, sizeof(int));
+        if ((*clientfd=accept(serverfd, (struct sockaddr *) &client, &client_len )) == -1) {
             perror("Accept error:");
-            return EXIT_FAILURE;
+            continue;
         }
 
-
-        strcpy(buffer, "Hello, client!\n\0");
-
-
-        /* Envia a primeira mensagem ao cilente */
-        if (send(clientfd, buffer, strlen(buffer), 0)) {
-            fprintf(stdout, "Client connected.\nWaiting for client message ...\n");
-
-            /* limpa o buffer */
-            memset(buffer, 0x0, BUFFER_LENGTH);
-
-            /* Comunica-se com o cliente */
-            int message_len;
-            while((message_len = recv(clientfd, buffer, BUFFER_LENGTH, 0)) > 0){
-
-                printf("Client sent: %s\n", buffer);
-
-                protocol = NULL;
-                
-                protocol = parseProtocol(buffer);
-                printProtocol(protocol);
-                
-                if (!validProtocol(protocol)){
-                    send(clientfd, "Invalid\n", 9, 0);
-                    continue;
-                }
-
-                if (strcmp(protocol->command, "pwd") == 0){
-                    send(clientfd, path, strlen(path), 0);
-                    send(clientfd, "\n", 1, 0);
-                    continue;
-                }
-                
-
-                char command[1000] = {0};
-                char responseCommand[4096];
-                
-                strcpy(command, "cd ");
-                strcat(command, path);
-                strcat(command, " && ");
-
-                strcat(command, protocol->command);
-
-                if (strcmp(protocol->command, "ls") == 0){
-                    strcat(command, " -1");
-                }if (
-                    strcmp(protocol->command, "mkdir") == 0 || 
-                    strcmp(protocol->command, "rm") == 0 ||
-                    strcmp(protocol->command, "rmdir") == 0 ||
-                    strcmp(protocol->command, "mv") == 0 ||
-                    strcmp(protocol->command, "rename") == 0   ){
-                
-                    strcat(command, " -v");
-
-                    if (strcmp(protocol->command, "mkdir") == 0){
-                        strcat(command, " -p");
-                    }
-                    
-                
-                }
+        Thread process;
+        process.input = clientfd;
+        create_thread(&process, functionClient); 
 
 
-                for (int i = 0; i < protocol->argc; i++){
-                    strcat(command, " "); 
-                    strcat(command, protocol->argv[i]);
-                }
-
-                strcat(command, " 2>&1");
-
-                if (strcmp(protocol->command, "cd") == 0){
-                    strcat(command, " && pwd");
-                }
-                
-                
-                printf("COMMAND: %s\n", command);
-                fp = popen(command, "r");
-
-                if (fp == NULL) {
-                    printf("Failed to run command\n" );
-                    exit(1);
-                }
-
-                while (fgets(responseCommand, sizeof(responseCommand), fp) != NULL) {
-                    send(clientfd, responseCommand, strlen(responseCommand), 0);
-                    
-                    if (strlen(responseCommand) > 2 && strcmp(protocol->command, "cd") == 0 && responseCommand[0] == '/'){
-                        if (responseCommand[strlen(responseCommand) - 1] == '\n'){
-                            responseCommand[strlen(responseCommand) - 1] = '\0';
-                        }
-                        strcpy(path, responseCommand);
-                    }
-                    
-                }
-
-                pclose(fp);
-                printf("PATH_MEMORY: %s\n", path);
-
-
-            }
-
-            if (message_len == -1){ /* Conexão do cliente ERROR */
-                printf("Error recv in client\n");
-            } else if (message_len == 0){ /* Conexão do cliente Close */
-                printf("Client disconnected\n");
-                close(clientfd);
-            }
-            
-        }
-
-       
     }
     
 
