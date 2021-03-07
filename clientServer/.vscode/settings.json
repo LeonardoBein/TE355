@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "sstream": "c",
+        "bitset": "c",
+        "chrono": "c",
+        "algorithm": "c",
+        "types.h": "c"
+    }
+}
